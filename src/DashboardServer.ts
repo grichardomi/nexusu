@@ -113,6 +113,10 @@ export class DashboardServer {
         this.respondJSON(res, this.getSizerStats());
       } else if (url === '/api/config') {
         this.respondJSON(res, this.getConfig());
+      } else if (url === '/api/position-health') {
+        this.respondJSON(res, this.getPositionHealth());
+      } else if (url === '/api/activity-feed') {
+        this.respondJSON(res, this.getActivityFeed());
       } else {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Not found' }));
@@ -247,6 +251,52 @@ export class DashboardServer {
   }
 
   /**
+   * Get position health status (erosion monitoring)
+   */
+  private getPositionHealth(): any {
+    const health = this.positionTracker.getPositionHealth();
+    return {
+      count: health.length,
+      positions: health.map((h) => ({
+        pair: h.pair,
+        entryPrice: h.entryPrice.toFixed(2),
+        currentProfit: h.currentProfit.toFixed(2),
+        profitPct: h.profitPct.toFixed(2),
+        peakProfit: h.peakProfit.toFixed(2),
+        erosionUsed: h.erosionUsed.toFixed(2),
+        erosionCap: (h.erosionCap * 100).toFixed(2),
+        erosionPct: h.erosionPct.toFixed(2),
+        holdTimeMinutes: h.holdTimeMinutes,
+        healthStatus: h.healthStatus,
+        alertMessage: h.alertMessage || '',
+      })),
+    };
+  }
+
+  /**
+   * Get activity feed (recent trades, pyramids, exits)
+   */
+  private getActivityFeed(): any {
+    const feed = this.positionTracker.getActivityFeed(30);
+    return {
+      count: feed.length,
+      activities: feed.map((a) => ({
+        timestamp: new Date(a.timestamp).toISOString(),
+        pair: a.pair,
+        action: a.action,
+        details: {
+          price: a.details.price?.toFixed(2) || 'N/A',
+          volume: a.details.volume?.toFixed(6) || 'N/A',
+          profit: a.details.profit?.toFixed(2) || 'N/A',
+          profitPct: a.details.profitPct?.toFixed(2) || 'N/A',
+          reason: a.details.reason || 'N/A',
+          erosionPct: a.details.erosionPct?.toFixed(2) || 'N/A',
+        },
+      })),
+    };
+  }
+
+  /**
    * Get bot configuration (trading settings)
    */
   private getConfig(): any {
@@ -324,6 +374,31 @@ export class DashboardServer {
     .json-toggle { display: inline-block; background: #334155; color: #e2e8f0; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-top: 10px; }
     .json-toggle:hover { background: #475569; }
     .hidden { display: none; }
+    .health-badge {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .health-healthy { background: #10b981; color: white; }
+    .health-caution { background: #f59e0b; color: white; }
+    .health-risk { background: #ef4444; color: white; }
+    .health-alert { background: #8b5cf6; color: white; }
+    .erosion-bar {
+      display: inline-block;
+      height: 6px;
+      border-radius: 3px;
+      background: #334155;
+      overflow: hidden;
+      width: 100px;
+      margin: 0 5px;
+      vertical-align: middle;
+    }
+    .erosion-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #10b981 0%, #f59e0b 70%, #ef4444 100%);
+    }
   </style>
 </head>
 <body>
@@ -443,6 +518,44 @@ export class DashboardServer {
     </div>
 
     <div class="card">
+      <h2>📊 Position Health Monitor</h2>
+      <table id="healthTable">
+        <thead>
+          <tr>
+            <th>Pair</th>
+            <th>Entry Price</th>
+            <th>Current P&L</th>
+            <th>Peak P&L</th>
+            <th>Erosion</th>
+            <th>Hold Time</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="healthBody">
+          <tr><td colspan="7" class="loading">No open positions</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>📈 Activity Feed (Recent 30)</h2>
+      <table id="feedTable">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Pair</th>
+            <th>Action</th>
+            <th>Price</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody id="feedBody">
+          <tr><td colspan="5" class="loading">Loading activities...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
       <h2>Recent Trades (Last 10)</h2>
       <table id="tradesTable">
         <thead>
@@ -476,7 +589,7 @@ export class DashboardServer {
 
     async function updateDashboard() {
       try {
-        const [status, positions, trades, stats, aiStats, sizerStats, config] = await Promise.all([
+        const [status, positions, trades, stats, aiStats, sizerStats, config, positionHealth, activityFeed] = await Promise.all([
           fetch('/api/status').then(r => r.json()),
           fetch('/api/positions').then(r => r.json()),
           fetch('/api/trades').then(r => r.json()),
@@ -484,6 +597,8 @@ export class DashboardServer {
           fetch('/api/ai-stats').then(r => r.json()),
           fetch('/api/sizer-stats').then(r => r.json()),
           fetch('/api/config').then(r => r.json()),
+          fetch('/api/position-health').then(r => r.json()),
+          fetch('/api/activity-feed').then(r => r.json()),
         ]);
 
         // Store for JSON viewer
@@ -541,6 +656,63 @@ export class DashboardServer {
             posHTML += p.pair + ': $' + p.entryPrice + ' (P&L: ' + p.profitPct + '%)' + '<br>';
           }
           document.getElementById('positionDetails').innerHTML = posHTML;
+        }
+
+        // Position Health table
+        const healthBody = document.getElementById('healthBody');
+        if (positionHealth.positions && positionHealth.positions.length > 0) {
+          let healthHTML = '';
+          for (const h of positionHealth.positions) {
+            const erosionPct = parseFloat(h.erosionPct);
+            const capPct = parseFloat(h.erosionCap);
+            const erosionRatio = Math.min(100, (erosionPct / capPct) * 100);
+            const statusClass = 'health-' + h.healthStatus.toLowerCase();
+            healthHTML += '<tr>' +
+              '<td><strong>' + h.pair + '</strong></td>' +
+              '<td>$' + h.entryPrice + '</td>' +
+              '<td class="' + (parseFloat(h.currentProfit) >= 0 ? 'success' : 'error') + '">' + h.currentProfit + '</td>' +
+              '<td>$' + h.peakProfit + '</td>' +
+              '<td>' +
+                '<div class="erosion-bar" title="' + erosionPct.toFixed(1) + '% / ' + capPct.toFixed(1) + '%">' +
+                  '<div class="erosion-fill" style="width: ' + erosionRatio + '%"></div>' +
+                '</div>' +
+                '<small>' + erosionPct.toFixed(1) + '%</small>' +
+              '</td>' +
+              '<td>' + h.holdTimeMinutes + 'm</td>' +
+              '<td><span class="health-badge ' + statusClass + '">' + h.healthStatus + '</span></td>' +
+            '</tr>';
+          }
+          healthBody.innerHTML = healthHTML;
+        } else {
+          healthBody.innerHTML = '<tr><td colspan="7" class="loading">No open positions</td></tr>';
+        }
+
+        // Activity Feed table
+        const feedBody = document.getElementById('feedBody');
+        if (activityFeed.activities && activityFeed.activities.length > 0) {
+          let feedHTML = '';
+          for (const a of activityFeed.activities) {
+            const timeStr = new Date(a.timestamp).toLocaleTimeString();
+            let detailsStr = '';
+            if (a.action === 'ENTRY' || a.action === 'PYRAMID') {
+              detailsStr = 'Price: $' + a.details.price + ' | Vol: ' + a.details.volume;
+            } else if (a.action === 'EXIT') {
+              detailsStr = 'P&L: ' + a.details.profit + ' (' + a.details.profitPct + '%) | Reason: ' + a.details.reason;
+            } else if (a.action === 'EROSION_ALERT') {
+              detailsStr = 'Erosion: ' + a.details.erosionPct + '%';
+            }
+            const actionClass = a.action === 'EXIT' ? 'success' : (a.action === 'EROSION_ALERT' ? 'error' : '');
+            feedHTML += '<tr>' +
+              '<td>' + timeStr + '</td>' +
+              '<td><strong>' + a.pair + '</strong></td>' +
+              '<td>' + a.action + '</td>' +
+              '<td>' + a.details.price + '</td>' +
+              '<td class="' + actionClass + '"><small>' + detailsStr + '</small></td>' +
+            '</tr>';
+          }
+          feedBody.innerHTML = feedHTML;
+        } else {
+          feedBody.innerHTML = '<tr><td colspan="5" class="loading">No activities yet</td></tr>';
         }
 
         // Trades table

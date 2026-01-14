@@ -229,7 +229,7 @@ class TradingBot {
         await this.processPair(pair);
       }
 
-      // Log periodic stats
+      // Log periodic stats and monitor for stuck positions
       const openPositions = this.positionTracker.getOpenPositions();
       if (openPositions.length > 0 || (Date.now() % 60000 < config.checkIntervalMs)) {
         // Log every minute or when there are positions
@@ -245,6 +245,25 @@ class TradingBot {
           estimatedCost: `$${aiStats.estimatedCostUSD.toFixed(2)}`,
           cacheHitRate: `${aiStats.cacheHitRate}%`,
         });
+
+        // Check for stuck positions (held > 4 hours with high erosion)
+        for (const pos of openPositions) {
+          const holdTimeMinutes = (Date.now() - pos.entryTime) / 60000;
+          const erosionPct = pos.peakProfit > 0 ? (pos.erosionUsed / pos.peakProfit) * 100 : 0;
+          const capPct = pos.erosionCap * 100;
+
+          if (holdTimeMinutes > 240 && erosionPct > capPct * 0.8) {
+            // Position held > 4 hours AND erosion > 80% of cap = alert
+            logger.warn(
+              `[ALERT] ${pos.pair} held ${holdTimeMinutes.toFixed(0)}min, erosion ${erosionPct.toFixed(1)}% (cap ${capPct.toFixed(1)}%)`,
+              {
+                currentProfit: `$${pos.currentProfit.toFixed(2)}`,
+                peakProfit: `$${pos.peakProfit.toFixed(2)}`,
+                recommendation: 'High erosion - consider manual exit or verify market conditions',
+              }
+            );
+          }
+        }
       }
     } catch (error) {
       logger.error('Error in trading iteration', { error });

@@ -316,3 +316,33 @@ export interface LogEntry {
   message: string;
   data?: Record<string, unknown>;
 }
+
+// Activity Feed Entry (for dashboard monitoring)
+export interface ActivityFeedEntry {
+  timestamp: number;
+  pair: string;
+  action: 'ENTRY' | 'PYRAMID' | 'EXIT' | 'EROSION_ALERT';
+  details: {
+    price?: number;
+    volume?: number;
+    profit?: number;
+    profitPct?: number;
+    reason?: string;
+    erosionPct?: number;
+  };
+}
+
+// Position Health (for dashboard)
+export interface PositionHealth {
+  pair: string;
+  entryPrice: number;
+  currentProfit: number;
+  profitPct: number;
+  peakProfit: number;
+  erosionUsed: number;
+  erosionCap: number;
+  erosionPct: number;
+  holdTimeMinutes: number;
+  healthStatus: 'HEALTHY' | 'CAUTION' | 'RISK' | 'ALERT';
+  alertMessage?: string;
+}

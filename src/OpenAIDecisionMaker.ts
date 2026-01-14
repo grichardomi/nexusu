@@ -73,15 +73,16 @@ COST ANALYSIS (Critical for profitability):
 - Risk-Reward: ${costs.riskRewardRatio.toFixed(2)}:1
 
 DECISION RULES (Follow Strictly):
-1. LEADING indicators (momentum, volume) matter most - they predict price movement
+1. Positive 1h momentum is PRIMARY signal - prices rising > secondary concerns
 2. Recent momentum (1h) is MORE important than 4h momentum
-3. DO NOT buy when momentum weak (<0.5% 1h momentum) - high failure rate
-4. DO NOT buy at local tops (price within 0.5% of recent high)
-5. DO NOT buy when RSI >85 (extreme overbought)
-6. Volume <1.0x average is OK if momentum is strong
-7. Focus on EARLY recovery signals - 1h positive when 4h still negative = good entry
+3. BUY when 1h momentum POSITIVE (>0%) - this indicates upward price movement
+4. HOLD when 1h momentum NEGATIVE (≤0%) - do not chase falling prices
+5. Secondary caution: Price near top (>1.0%) OR RSI extreme (>85) - only if momentum weak
+6. Low volume acceptable if momentum positive - shows early stage of move
+7. Focus on EARLY recovery signals - 1h positive when 4h negative = strong entry
 8. Cost floor check: If profit < ${(costs.costFloorPct * 100).toFixed(2)}%, we HOLD
 9. If risk-reward < 2.0, we HOLD
+10. PRIORITY: A positive 1h momentum reading OVERRIDES secondary technical concerns
 
 REGIME-SPECIFIC STRATEGY:
 - ${this.getRegimeStrategy(indicators.adx)}

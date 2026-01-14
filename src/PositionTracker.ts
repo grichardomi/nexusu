@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from './utils/logger';
-import { Position, PerformanceStats, AIDecision, PyramidLevel } from './utils/types';
+import { Position, PerformanceStats, AIDecision, PyramidLevel, ActivityFeedEntry, PositionHealth } from './utils/types';
 
 /**
  * Position Tracker
@@ -10,6 +10,8 @@ import { Position, PerformanceStats, AIDecision, PyramidLevel } from './utils/ty
 export class PositionTracker {
   private positions: Map<string, Position> = new Map();
   private closedPositions: Position[] = [];
+  private activityFeed: ActivityFeedEntry[] = [];
+  private maxActivityFeedSize: number = 100; // Keep last 100 activities
   private dataDir: string = './data';
 
   constructor(dataDir: string = './data') {
@@ -37,7 +39,14 @@ export class PositionTracker {
       if (fs.existsSync(filePath)) {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         this.closedPositions = data.closed || [];
-        logger.info(`Loaded ${this.closedPositions.length} closed positions from disk`);
+
+        // Load open positions
+        const openPositionsData = data.open || [];
+        for (const posData of openPositionsData) {
+          this.positions.set(posData.pair, posData as Position);
+        }
+
+        logger.info(`Loaded ${this.closedPositions.length} closed positions and ${openPositionsData.length} open positions from disk`);
       }
     } catch (error) {
       logger.warn('Failed to load positions from disk', { error });
@@ -51,7 +60,11 @@ export class PositionTracker {
     const filePath = path.join(this.dataDir, 'positions.json');
 
     try {
+      // Convert open positions Map to array
+      const openPositions = Array.from(this.positions.values());
+
       const data = {
+        open: openPositions,
         closed: this.closedPositions,
         timestamp: Date.now(),
       };
@@ -59,6 +72,24 @@ export class PositionTracker {
     } catch (error) {
       logger.error('Failed to save positions to disk', { error });
     }
+  }
+
+  /**
+   * Log activity to feed (entries, pyramids, exits, alerts)
+   */
+  private logActivity(entry: ActivityFeedEntry): void {
+    this.activityFeed.push(entry);
+    // Keep only last 100 activities to avoid memory bloat
+    if (this.activityFeed.length > this.maxActivityFeedSize) {
+      this.activityFeed = this.activityFeed.slice(-this.maxActivityFeedSize);
+    }
+  }
+
+  /**
+   * Get recent activity feed (for dashboard)
+   */
+  getActivityFeed(limit: number = 20): ActivityFeedEntry[] {
+    return this.activityFeed.slice(-limit).reverse();
   }
 
   /**
@@ -111,6 +142,20 @@ export class PositionTracker {
     };
 
     this.positions.set(pair, position);
+
+    // Persist position to disk immediately
+    this.savePositions();
+
+    // Log activity to feed
+    this.logActivity({
+      timestamp: Date.now(),
+      pair,
+      action: 'ENTRY',
+      details: {
+        price: entryPrice,
+        volume,
+      },
+    });
 
     logger.logTradeEntry(pair, 'OPEN', {
       entryPrice,
@@ -224,6 +269,20 @@ export class PositionTracker {
     position.totalVolume += volume;
     position.pyramidLevelsActivated++;
 
+    // Persist position changes
+    this.savePositions();
+
+    // Log activity to feed
+    this.logActivity({
+      timestamp: Date.now(),
+      pair,
+      action: 'PYRAMID',
+      details: {
+        price: entryPrice,
+        volume,
+      },
+    });
+
     logger.info(`[PYRAMID] ${pair} L${level} added at $${entryPrice.toFixed(2)} (${(volume * entryPrice).toFixed(2)} USD)`, {
       addSize: `${volume.toFixed(6)} units`,
       aiConfidence,
@@ -234,23 +293,39 @@ export class PositionTracker {
 
   /**
    * Check if erosion cap exceeded
-   * Closes position if giveback exceeds cap
+   * Closes position if giveback exceeds cap (applies to ALL positions, not just pyramid)
+   * Erosion cap is stored as decimal percentage (0.008 = 0.8%)
+   * Check compares: erosionUsed as % of peakProfit vs erosionCap as %
    */
   checkErosionCap(pair: string): boolean {
     const position = this.positions.get(pair);
     if (!position) return false;
 
-    // Only protect if we have pyramid levels
-    if (position.pyramidLevelsActivated === 0) return false;
+    // Only check if position is in profit (has peak profit to protect)
+    if (position.peakProfit <= 0) return false;
 
-    const erosionPct = position.peakProfit > 0 ? (position.erosionUsed / position.peakProfit) * 100 : 0;
+    // Calculate erosion as percentage of peak profit
+    const erosionPct = (position.erosionUsed / position.peakProfit) * 100;
+
+    // erosionCap is stored as decimal (0.008 = 0.8%), convert to percentage for comparison
     const capPct = position.erosionCap * 100;
 
-    if (position.erosionUsed > position.erosionCap) {
+    if (erosionPct > capPct) {
       logger.warn(`[EROSION EXIT] ${pair} erosion (${erosionPct.toFixed(2)}%) exceeded cap (${capPct.toFixed(2)}%)`, {
         peakProfit: `$${position.peakProfit.toFixed(2)}`,
         erosion: `$${position.erosionUsed.toFixed(2)}`,
       });
+
+      // Log erosion alert to feed
+      this.logActivity({
+        timestamp: Date.now(),
+        pair,
+        action: 'EROSION_ALERT',
+        details: {
+          erosionPct: parseFloat(erosionPct.toFixed(2)),
+        },
+      });
+
       return true;
     }
 
@@ -327,6 +402,19 @@ export class PositionTracker {
     // Log trade exit
     logger.logTradeExit(pair, position.profitPct, exitReason);
 
+    // Log activity to feed
+    this.logActivity({
+      timestamp: Date.now(),
+      pair,
+      action: 'EXIT',
+      details: {
+        price: exitPrice,
+        profit: position.currentProfit,
+        profitPct: position.profitPct,
+        reason: exitReason,
+      },
+    });
+
     // Move to closed positions
     this.closedPositions.push(position);
     this.positions.delete(pair);
@@ -381,6 +469,12 @@ export class PositionTracker {
       const drawdown = peak - cumulativeProfit;
       if (drawdown > maxDrawdown) {
         maxDrawdown = drawdown;
+      }
+
+      // Also check intra-trade drawdown (peak profit vs final profit within the trade)
+      const intraTradeDrawdown = position.peakProfit - position.currentProfit;
+      if (intraTradeDrawdown > maxDrawdown) {
+        maxDrawdown = intraTradeDrawdown;
       }
     }
 
@@ -446,6 +540,50 @@ export class PositionTracker {
     } catch (error) {
       logger.error('Failed to export trades to CSV', { error });
     }
+  }
+
+  /**
+   * Get position health status (for dashboard monitoring)
+   */
+  getPositionHealth(): PositionHealth[] {
+    const health: PositionHealth[] = [];
+
+    for (const position of this.positions.values()) {
+      const holdTimeMinutes = (Date.now() - position.entryTime) / 60000;
+      const erosionPct = position.peakProfit > 0 ? (position.erosionUsed / position.peakProfit) * 100 : 0;
+      const capPct = position.erosionCap * 100;
+
+      // Determine health status
+      let healthStatus: 'HEALTHY' | 'CAUTION' | 'RISK' | 'ALERT' = 'HEALTHY';
+      let alertMessage: string | undefined;
+
+      if (erosionPct > capPct) {
+        healthStatus = 'ALERT';
+        alertMessage = `EROSION EXCEEDED: ${erosionPct.toFixed(1)}% (cap: ${capPct.toFixed(1)}%)`;
+      } else if (erosionPct > capPct * 0.7) {
+        healthStatus = 'RISK';
+        alertMessage = `High erosion: ${erosionPct.toFixed(1)}% of ${capPct.toFixed(1)}% cap`;
+      } else if (erosionPct > capPct * 0.3) {
+        healthStatus = 'CAUTION';
+        alertMessage = holdTimeMinutes > 240 ? `Long-held position (${holdTimeMinutes.toFixed(0)}min)` : undefined;
+      }
+
+      health.push({
+        pair: position.pair,
+        entryPrice: position.entryPrice,
+        currentProfit: position.currentProfit,
+        profitPct: position.profitPct,
+        peakProfit: position.peakProfit,
+        erosionUsed: position.erosionUsed,
+        erosionCap: position.erosionCap,
+        erosionPct: parseFloat(erosionPct.toFixed(2)),
+        holdTimeMinutes: Math.round(holdTimeMinutes),
+        healthStatus,
+        alertMessage,
+      });
+    }
+
+    return health;
   }
 
   /**

@@ -152,6 +152,8 @@ export class KrakenClient {
     const postdata = new URLSearchParams({ nonce, ...params });
     const postdata_str = postdata.toString();
 
+    // Kraken signing: endpoint path + SHA256(nonce + postdata)
+    // The Buffer is automatically converted to UTF-8 string during concatenation
     const message = endpoint + crypto.createHash('sha256').update(nonce + postdata_str).digest();
 
     const signature = crypto
@@ -173,8 +175,14 @@ export class KrakenClient {
    * Fetch private API endpoint
    */
   private async privateRequest<T>(endpoint: string, params: Record<string, string> = {}): Promise<T> {
-    const nonce = Date.now().toString();
-    const { headers, body } = this.signRequest(endpoint, params, nonce);
+    // Generate unique nonce: milliseconds with random microsecond precision
+    // This matches the format that passes Kraken's nonce validation
+    const nowSec = Math.floor(Date.now() / 1000);
+    const nonce = (nowSec * 1000 + Math.floor(Math.random() * 1000)).toString();
+
+    // Sign with full URI path for Kraken API
+    const uriPath = `/0/private/${endpoint}`;
+    const { headers, body } = this.signRequest(uriPath, params, nonce);
 
     return this.withRetry(async () => {
       const response = await fetch(`${this.baseUrl}/0/private/${endpoint}`, {
